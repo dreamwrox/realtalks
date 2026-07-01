@@ -34,15 +34,15 @@ const STYLE = `
 .side .top .me small { display:block; font-size:11.5px; color:var(--ink3); }
 .icon { width:34px;height:34px;border-radius:10px;border:none;background:var(--panel2);color:var(--ink2);cursor:pointer;display:grid;place-items:center;font-size:16px; }
 .icon:hover { background:var(--bg); }
-.filter { margin:6px 14px 8px; position:relative; }
-.filter input { width:100%; padding:10px 12px 10px 34px; border-radius:11px; border:1px solid var(--line); background:var(--panel2); color:var(--ink); font-size:14px; outline:none; }
-.filter input:focus { border-color:var(--accent); }
-.filter svg { position:absolute; left:11px; top:50%; transform:translateY(-50%); color:var(--ink3); }
-.seclabel { padding:10px 18px 4px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--ink3); }
+.search { margin:6px 14px 8px; position:relative; }
+.search input { width:100%; padding:11px 12px 11px 36px; border-radius:12px; border:1px solid var(--line); background:var(--panel2); color:var(--ink); font-size:14px; outline:none; }
+.search input:focus { border-color:var(--accent); background:var(--panel); }
+.search svg { position:absolute; left:12px; top:50%; transform:translateY(-50%); color:var(--ink3); }
+.seclabel { padding:8px 18px 4px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--ink3); }
 .list { flex:1; overflow-y:auto; padding:0 8px 10px; }
 .crow { display:flex; align-items:center; gap:12px; padding:11px 10px; border-radius:13px; cursor:pointer; }
 .crow:hover { background:var(--panel2); } .crow.on { background:var(--bg); }
-.av { width:44px;height:44px;border-radius:50%; display:grid;place-items:center;color:#fff;font-weight:600;font-size:16px; flex-shrink:0; position:relative; }
+.av { width:44px;height:44px;border-radius:50%; display:grid;place-items:center;color:#fff;font-weight:600;font-size:16px; flex-shrink:0; }
 .crow .m { flex:1; min-width:0; } .crow .m b{ font-size:15px; font-weight:600; } .crow .m span{ display:block; font-size:13px; color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .udot { width:20px;height:20px;border-radius:50%;background:var(--accent);color:#fff;font-size:11px;font-weight:700;display:grid;place-items:center;flex-shrink:0; }
 .empty2 { text-align:center; color:var(--ink3); font-size:13.5px; padding:26px 18px; line-height:1.5; }
@@ -75,6 +75,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [booting, setBooting] = useState(true);
   const [me, setMe] = useState(null);
+  const [profileLoading, setProfileLoading] = useState(false);
 
   const [mode, setMode] = useState("signin");
   const [email, setEmail] = useState("");
@@ -83,12 +84,13 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  const [people, setPeople] = useState([]);      // all other users, with last-message info
-  const [unread, setUnread] = useState({});       // { userId: count }
+  const [chats, setChats] = useState([]);      // people you've messaged
+  const [query, setQuery] = useState("");      // search text
+  const [results, setResults] = useState([]);  // search matches from the database
+  const [unread, setUnread] = useState({});
   const [active, setActive] = useState(null);
   const [messages, setMessages] = useState([]);
   const [text, setText] = useState("");
-  const [filter, setFilter] = useState("");
   const threadRef = useRef(null);
   const activeRef = useRef(null);
   useEffect(() => { activeRef.current = active; }, [active]);
@@ -103,45 +105,46 @@ export default function App() {
 
   useEffect(() => {
     if (!session) { setMe(null); return; }
+    setProfileLoading(true);
     (async () => {
       const { data } = await supabase.from("profiles").select("id,username").eq("id", session.user.id).maybeSingle();
-      if (data) setMe(data);
+      setMe(data || null);
+      setProfileLoading(false);
     })();
   }, [session]);
 
-  /* ---- load everyone who has signed up (minus me), with last message + order ---- */
-  const loadPeople = useCallback(async () => {
+  /* ---- your chats: people you've exchanged messages with ---- */
+  const loadChats = useCallback(async () => {
     if (!me) return;
-    const { data: profs } = await supabase.from("profiles").select("id,username").neq("id", me.id);
     const { data: msgs } = await supabase.from("messages").select("sender,recipient,body,created_at")
       .or(`sender.eq.${me.id},recipient.eq.${me.id}`).order("created_at", { ascending: false });
-    const lastByPartner = {};
-    (msgs || []).forEach(m => {
-      const other = m.sender === me.id ? m.recipient : m.sender;
-      if (!lastByPartner[other]) lastByPartner[other] = m; // first = newest (desc order)
-    });
-    const list = (profs || []).map(p => ({ ...p, last: lastByPartner[p.id] || null }));
-    list.sort((a, b) => {
-      const ta = a.last ? new Date(a.last.created_at).getTime() : 0;
-      const tb = b.last ? new Date(b.last.created_at).getTime() : 0;
-      if (ta !== tb) return tb - ta;                 // recent conversations first
-      return a.username.localeCompare(b.username);   // then alphabetical
-    });
-    setPeople(list);
+    const last = {};
+    (msgs || []).forEach(m => { const o = m.sender === me.id ? m.recipient : m.sender; if (!last[o]) last[o] = m; });
+    const ids = Object.keys(last);
+    if (ids.length === 0) { setChats([]); return; }
+    const { data: profs } = await supabase.from("profiles").select("id,username").in("id", ids);
+    const list = (profs || []).map(p => ({ ...p, last: last[p.id] }));
+    list.sort((a, b) => new Date(b.last.created_at) - new Date(a.last.created_at));
+    setChats(list);
   }, [me]);
 
-  useEffect(() => { if (me) loadPeople(); }, [me, loadPeople]);
+  useEffect(() => { if (me) loadChats(); }, [me, loadChats]);
 
-  /* ---- keep the list fresh: on focus + every 20s (so new signups appear) ---- */
+  /* ---- search users by name (typed in the box) ---- */
   useEffect(() => {
     if (!me) return;
-    const onFocus = () => loadPeople();
-    window.addEventListener("focus", onFocus);
-    const iv = setInterval(loadPeople, 20000);
-    return () => { window.removeEventListener("focus", onFocus); clearInterval(iv); };
-  }, [me, loadPeople]);
+    const q = query.trim().toLowerCase();
+    if (!q) { setResults([]); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const { data } = await supabase.from("profiles").select("id,username")
+        .ilike("username", `%${q}%`).neq("id", me.id).limit(20);
+      if (!cancelled) setResults(data || []);
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [query, me]);
 
-  /* ---- realtime: messages sent to me ---- */
+  /* ---- realtime: messages to me ---- */
   useEffect(() => {
     if (!me) return;
     const ch = supabase.channel("rt-messages")
@@ -151,13 +154,13 @@ export default function App() {
           const open = activeRef.current;
           if (open && m.sender === open.id) setMessages(cur => [...cur, m]);
           else setUnread(u => ({ ...u, [m.sender]: (u[m.sender] || 0) + 1 }));
-          loadPeople();
+          loadChats();
         })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [me, loadPeople]);
+  }, [me, loadChats]);
 
-  /* ---- load a conversation ---- */
+  /* ---- open a conversation ---- */
   useEffect(() => {
     if (!me || !active) { setMessages([]); return; }
     (async () => {
@@ -171,6 +174,8 @@ export default function App() {
 
   useEffect(() => { if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight; }, [messages.length, active]);
 
+  function openChat(person) { setActive(person); setQuery(""); setResults([]); }
+
   /* ---- auth ---- */
   async function submitAuth() {
     setErr(""); setBusy(true);
@@ -183,7 +188,7 @@ export default function App() {
         if (taken.data) throw new Error("That username is taken.");
         const { data, error } = await supabase.auth.signUp({ email: email.trim(), password: pw });
         if (error) throw error;
-        if (!data.session) { setErr("Account made! If email confirmation is on, confirm via email then sign in. (You can turn it off in Supabase — see README.)"); setMode("signin"); setBusy(false); return; }
+        if (!data.session) { setErr("Account made! If email confirmation is on, confirm via email then sign in."); setMode("signin"); setBusy(false); return; }
         const { error: pe } = await supabase.from("profiles").insert({ id: data.user.id, username: clean });
         if (pe) throw pe;
       } else {
@@ -191,7 +196,26 @@ export default function App() {
         const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
         if (error) throw error;
       }
-    } catch (e) { setErr(e.message || "Something went wrong."); }
+    } catch (e) {
+      let msg = e.message || "Something went wrong.";
+      if (/already registered/i.test(msg)) { msg = "This email already has an account — switch to Sign in below."; setMode("signin"); }
+      setErr(msg);
+    }
+    setBusy(false);
+  }
+
+  async function setupUsername() {
+    setErr("");
+    const clean = uname.trim().toLowerCase();
+    if (!/^[a-z0-9_]{3,20}$/.test(clean)) { setErr("Username: 3-20 letters, numbers or _ only."); return; }
+    setBusy(true);
+    try {
+      const taken = await supabase.from("profiles").select("id").eq("username", clean).maybeSingle();
+      if (taken.data) throw new Error("That username is taken.");
+      const { data, error } = await supabase.from("profiles").insert({ id: session.user.id, username: clean }).select().single();
+      if (error) throw error;
+      setMe(data);
+    } catch (e) { setErr(e.message || "Could not set username."); }
     setBusy(false);
   }
 
@@ -203,10 +227,10 @@ export default function App() {
     setMessages(cur => [...cur, optimistic]);
     const { data, error } = await supabase.from("messages").insert({ sender: me.id, recipient: active.id, body }).select().single();
     if (!error && data) setMessages(cur => cur.map(m => m.id === optimistic.id ? data : m));
-    loadPeople();
+    loadChats();
   }
 
-  async function signOut() { await supabase.auth.signOut(); setMe(null); setPeople([]); setActive(null); setMessages([]); setUnread({}); }
+  async function signOut() { await supabase.auth.signOut(); setMe(null); setChats([]); setActive(null); setMessages([]); setUnread({}); setQuery(""); }
 
   /* ---- render ---- */
   if (!configured) {
@@ -218,7 +242,7 @@ export default function App() {
   }
   if (booting) return <div className="tl"><style>{STYLE}</style><div className="welcome"><div className="ring display">T</div><div>Loading…</div></div></div>;
 
-  if (!session || !me) {
+  if (!session) {
     return (
       <div className="tl"><style>{STYLE}</style>
         <div className="auth"><div className="card">
@@ -240,7 +264,26 @@ export default function App() {
     );
   }
 
-  const shown = people.filter(p => p.username.includes(filter.trim().toLowerCase()));
+  if (profileLoading) return <div className="tl"><style>{STYLE}</style><div className="welcome"><div className="ring display">T</div><div>Loading…</div></div></div>;
+
+  if (!me) {
+    return (
+      <div className="tl"><style>{STYLE}</style>
+        <div className="auth"><div className="card">
+          <div className="logo display">T</div>
+          <h1>Finish setting up</h1>
+          <p className="sub">Your account is ready — just pick a username your friends will see.</p>
+          {err && <div className="err2">{err}</div>}
+          <div className="field2"><label>Username</label>
+            <input value={uname} onChange={e => setUname(e.target.value)} placeholder="e.g. jaikaran" autoCapitalize="none" onKeyDown={e => e.key === "Enter" && setupUsername()} /></div>
+          <button className="pbtn" disabled={busy} onClick={setupUsername}>{busy ? "Please wait…" : "Save username"}</button>
+          <div className="swap"><b onClick={signOut}>Sign out</b></div>
+        </div></div>
+      </div>
+    );
+  }
+
+  const searching = query.trim().length > 0;
 
   return (
     <div className="tl" data-open={String(!!active)}>
@@ -253,20 +296,33 @@ export default function App() {
           </div>
           <button className="icon" title="Sign out" onClick={signOut}>⎋</button>
         </div>
-        <div className="filter">
+        <div className="search">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-          <input value={filter} placeholder="Filter people" autoCapitalize="none" onChange={e => setFilter(e.target.value)} />
+          <input value={query} placeholder="Search people by name" autoCapitalize="none" onChange={e => setQuery(e.target.value)} />
         </div>
-        <div className="seclabel">People on Talks</div>
+
+        <div className="seclabel">{searching ? "Search results" : "Chats"}</div>
         <div className="list">
-          {shown.length === 0 && <div className="empty2">No one else has signed up yet.<br/>When a friend creates an account, they'll show up here automatically.</div>}
-          {shown.map(p => (
-            <div key={p.id} className={`crow ${active?.id === p.id ? "on" : ""}`} onClick={() => setActive(p)}>
-              <div className="av" style={{ background: colorFor(p.username) }}>{initial(p.username)}</div>
-              <div className="m"><b>{p.username}</b><span>{p.last ? (p.last.sender === me.id ? "You: " : "") + p.last.body : "Tap to start chatting"}</span></div>
-              {unread[p.id] > 0 && <div className="udot">{unread[p.id]}</div>}
-            </div>
-          ))}
+          {searching ? (
+            results.length === 0
+              ? <div className="empty2">No one found matching “{query.trim()}”.<br/>Make sure they've signed up and check the spelling.</div>
+              : results.map(p => (
+                  <div key={p.id} className="crow" onClick={() => openChat(p)}>
+                    <div className="av" style={{ background: colorFor(p.username) }}>{initial(p.username)}</div>
+                    <div className="m"><b>{p.username}</b><span>Tap to start chatting</span></div>
+                  </div>
+                ))
+          ) : (
+            chats.length === 0
+              ? <div className="empty2">No chats yet.<br/>Search a friend's name above to start your first conversation.</div>
+              : chats.map(p => (
+                  <div key={p.id} className={`crow ${active?.id === p.id ? "on" : ""}`} onClick={() => openChat(p)}>
+                    <div className="av" style={{ background: colorFor(p.username) }}>{initial(p.username)}</div>
+                    <div className="m"><b>{p.username}</b><span>{(p.last.sender === me.id ? "You: " : "") + p.last.body}</span></div>
+                    {unread[p.id] > 0 && <div className="udot">{unread[p.id]}</div>}
+                  </div>
+                ))
+          )}
         </div>
       </div>
 
@@ -290,7 +346,7 @@ export default function App() {
         <div className="main"><div className="welcome">
           <div className="ring display">T</div>
           <div><div className="display" style={{ fontSize: 20, fontWeight: 700, color: "var(--ink)", marginBottom: 4 }}>Talks Live</div>
-            <div style={{ maxWidth: 300 }}>Tap anyone on the left to chat. New friends appear here as soon as they sign up.</div></div>
+            <div style={{ maxWidth: 300 }}>Search a friend's name in the box on the left to start a chat. Messages arrive in real time.</div></div>
         </div></div>
       )}
     </div>
